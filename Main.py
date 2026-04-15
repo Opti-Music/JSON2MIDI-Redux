@@ -61,6 +61,7 @@ def resource_path(relative_path):
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
+    
     return os.path.join(base_path, relative_path)
 
 
@@ -452,10 +453,8 @@ class JSON2MIDI(QMainWindow):
         file_layout.addWidget(self.chart_file_label, 0, 1)
         self.browse_chart_btn = QPushButton("Browse")
 
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        if os.path.exists(browse_icon_path):
             self.browse_chart_btn.setIcon(QIcon(browse_icon_path))
-        else:
-            self.browse_chart_btn.setIcon(QIcon("icons/browse.png"))
 
         self.browse_chart_btn.clicked.connect(self.browse_chart)
         file_layout.addWidget(self.browse_chart_btn, 0, 2)
@@ -469,11 +468,9 @@ class JSON2MIDI(QMainWindow):
         self.meta_file_label.setFrameStyle(QFrame.Shape.Panel | QFrame.Shadow.Sunken)
         self.meta_file_label.setStyleSheet("color: #888888;")
         self.browse_meta_btn = QPushButton("Browse")
-
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        
+        if os.path.exists(browse_icon_path):
             self.browse_meta_btn.setIcon(QIcon(browse_icon_path))
-        else:
-            self.browse_meta_btn.setIcon(QIcon("icons/browse.png"))
 
         self.browse_meta_btn.clicked.connect(self.browse_metadata)
 
@@ -489,11 +486,9 @@ class JSON2MIDI(QMainWindow):
         self.output_file_label.setFrameStyle(QFrame.Shape.Panel | QFrame.Shadow.Sunken)
         file_layout.addWidget(self.output_file_label, 2, 1)
         self.browse_output_btn = QPushButton("Browse")
-
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        
+        if os.path.exists(browse_icon_path):
             self.browse_output_btn.setIcon(QIcon(browse_icon_path))
-        else:
-            self.browse_output_btn.setIcon(QIcon("icons/browse.png"))
 
         self.browse_output_btn.clicked.connect(self.browse_output)
         file_layout.addWidget(self.browse_output_btn, 2, 2)
@@ -531,11 +526,9 @@ class JSON2MIDI(QMainWindow):
 
         self.convert_btn = QPushButton("Convert to MIDI")
         self.convert_btn.setMinimumHeight(40)
-
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        
+        if os.path.exists(convert_icon_path):
             self.convert_btn.setIcon(QIcon(convert_icon_path))
-        else:
-            self.convert_btn.setIcon(QIcon("icons/convert.png"))
 
         self.convert_btn.clicked.connect(self.start_conversion)
         main_ui_layout.addWidget(self.convert_btn)
@@ -871,7 +864,7 @@ class JSON2MIDI(QMainWindow):
             self.engine_combo.currentText(),
             self.bpm_spin.value(),
             self.difficulty_combo.currentText(),
-            meta_path=self.meta_path if self.meta_path else None,
+            self.meta_path if self.meta_path else None,
         )
 
         self.conversion_thread.progress.connect(self.update_progress)
@@ -904,15 +897,12 @@ class JSON2MIDI(QMainWindow):
 
 
 def main():
-    app_icon_path = resource_path("icons/app.ico")
-
     app = QApplication(sys.argv)
     app.setApplicationName("JSON2MIDI")
 
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    app_icon_path = resource_path("icons/app.ico")
+    if os.path.exists(app_icon_path):
         app.setWindowIcon(QIcon(app_icon_path))
-    else:
-        app.setWindowIcon(QIcon("icons/app.ico"))
 
     window = JSON2MIDI()
     window.show()
