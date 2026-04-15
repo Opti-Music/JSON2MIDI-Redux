@@ -21,6 +21,8 @@ This is a Python tool built using PySide6 that allows you to convert a chart int
 
 ### Method 2
 ### Run via Terminal
+> [!NOTE]
+> Use this method if you can't run the app via executable on Method 1
 1. Click at `Code` button then click at `Download ZIP` button
 2. Locate `.zip` file and extract it
 3. Open the folder and click on `install_dependencies.bat` file
