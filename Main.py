@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QMutex
 from PySide6.QtGui import QFont, QIcon
 
 import mido
@@ -61,7 +61,7 @@ def resource_path(relative_path):
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
-    
+
     return os.path.join(base_path, relative_path)
 
 
@@ -88,14 +88,33 @@ class ConversionThread(QThread):
         self.difficulty = difficulty
         self.split_tracks = split_tracks
         self.meta_path = meta_path
+        self._mutex = QMutex()
+        self._is_running = True
+
+    def stop(self):
+        self._mutex.lock()
+        self._is_running = False
+        self._mutex.unlock()
+
+    def is_running(self):
+        self._mutex.lock()
+        running = self._is_running
+        self._mutex.unlock()
+        return running
 
     def run(self):
         try:
+            if not self.is_running():
+                return
+
             self.status.emit("Loading chart file...")
             self.progress.emit(10)
 
             with open(self.chart_path, "r", encoding="utf-8") as f:
                 chart_data = json.load(f)
+
+            if not self.is_running():
+                return
 
             self.progress.emit(20)
 
@@ -108,6 +127,9 @@ class ConversionThread(QThread):
             else:
                 self._convert_psych_v1(chart_data)
 
+            if not self.is_running():
+                return
+
             self.progress.emit(100)
             self.finished_signal.emit(True, "Conversion completed successfully!")
 
@@ -116,20 +138,34 @@ class ConversionThread(QThread):
 
     def _convert_psych_v1(self, chart_data: Dict):
         bpm = self.bpm_override if self.bpm_override > 0 else chart_data.get("bpm", 120)
+
+        if bpm <= 0:
+            bpm = 120
+
         notes = chart_data.get("notes", [])
+
+        if not notes:
+            raise ValueError("No note sections found in chart file")
 
         self._create_midi_from_psych_notes(notes, bpm)
 
     def _convert_psych_old(self, chart_data: Dict):
         song_data = chart_data.get("song", {})
         bpm = self.bpm_override if self.bpm_override > 0 else song_data.get("bpm", 120)
+
+        if bpm <= 0:
+            bpm = 120
+
         notes = song_data.get("notes", [])
+
+        if not notes:
+            raise ValueError("No note sections found in chart file")
 
         self._create_midi_from_psych_notes(notes, bpm)
 
     def _convert_codename(self, chart_data: Dict):
         bpm = self.bpm_override
-        if bpm == 0:
+        if bpm <= 0:
             if self.meta_path and os.path.exists(self.meta_path):
                 try:
                     with open(self.meta_path, "r") as f:
@@ -155,6 +191,10 @@ class ConversionThread(QThread):
         gf_notes = []
 
         strumlines = chart_data.get("strumLines", [])
+
+        if not strumlines:
+            raise ValueError("No strum lines found in chart file")
+
         for strumline in strumlines:
             position = strumline.get("position", "")
             notes_data = strumline.get("notes", [])
@@ -175,7 +215,7 @@ class ConversionThread(QThread):
 
     def _convert_vslice(self, chart_data: Dict):
         bpm = self.bpm_override
-        if bpm == 0:
+        if bpm <= 0:
             if self.meta_path and os.path.exists(self.meta_path):
                 try:
                     with open(self.meta_path, "r") as f:
@@ -208,7 +248,17 @@ class ConversionThread(QThread):
                     bpm = 120
 
         notes_data = chart_data.get("notes", {})
+
+        available_diffs = list(notes_data.keys())
+        if self.difficulty not in available_diffs:
+            raise ValueError(
+                f"Difficulty '{self.difficulty}' not found. Available: {', '.join(available_diffs)}"
+            )
+
         notes_list = notes_data.get(self.difficulty, [])
+
+        if not notes_list:
+            raise ValueError(f"No notes found for difficulty: {self.difficulty}")
 
         player_notes = []
         opponent_notes = []
@@ -230,14 +280,17 @@ class ConversionThread(QThread):
         opponent_notes = []
         gf_notes = []
 
-        section_length_ms = (60000 / bpm) * 4
         current_must_hit = True
 
         for section_idx, section in enumerate(sections):
+            if not self.is_running():
+                return
+
             if not isinstance(section, dict):
                 continue
 
             must_hit = section.get("mustHitSection", current_must_hit)
+            current_must_hit = must_hit
 
             section_notes = section.get("sectionNotes", [])
             for note in section_notes:
@@ -252,7 +305,10 @@ class ConversionThread(QThread):
                 is_gf = note_type == "GF Sing"
 
                 if is_gf:
-                    gf_notes.append((time_ms, lane, sustain))
+                    if 0 <= lane <= 7:
+                        gf_notes.append((time_ms, lane, sustain))
+                    else:
+                        print(f"Warning: GF note with invalid lane {lane} ignored")
                 elif must_hit:
                     if lane < 4:
                         player_notes.append((time_ms, lane, sustain))
@@ -273,6 +329,15 @@ class ConversionThread(QThread):
         gf_notes: List,
         bpm: float,
     ):
+        if not self.is_running():
+            return
+
+        if bpm <= 0:
+            bpm = 120
+
+        if not player_notes and not opponent_notes and not gf_notes:
+            raise ValueError("No notes found in chart file")
+
         self.status.emit("Creating MIDI file...")
         self.progress.emit(60)
 
@@ -287,18 +352,13 @@ class ConversionThread(QThread):
         if self.split_tracks:
             dad_track = mido.MidiTrack()
             bf_track = mido.MidiTrack()
-            gf_track = mido.MidiTrack() if gf_notes else None
+            gf_track = mido.MidiTrack()
 
-            midi.tracks.extend(
-                [t for t in [dad_track, bf_track, gf_track] if t is not None]
-            )
+            midi.tracks.extend([dad_track, bf_track, gf_track])
 
             dad_track.append(mido.MetaMessage("track_name", name="Dad", time=0))
             bf_track.append(mido.MetaMessage("track_name", name="Boyfriend", time=0))
-            if gf_track:
-                gf_track.append(
-                    mido.MetaMessage("track_name", name="Girlfriend", time=0)
-                )
+            gf_track.append(mido.MetaMessage("track_name", name="Girlfriend", time=0))
         else:
             main_track = mido.MidiTrack()
             midi.tracks.append(main_track)
@@ -306,55 +366,126 @@ class ConversionThread(QThread):
 
         base_note = 60
 
+        sixteenth_ms = (60000 / bpm) / 4
+        min_note_duration_ms = max(1, sixteenth_ms / 2)
+
         all_events = []
+        warning_count = 0
+        max_warnings = 10
 
         for time_ms, lane, sustain in player_notes:
+            if not self.is_running():
+                return
             if 0 <= lane <= 3:
                 midi_note = base_note + lane
                 all_events.append((time_ms, "note_on", midi_note, 100, "bf"))
                 if sustain > 0:
                     all_events.append(
-                        (time_ms + sustain, "note_off", midi_note, 0, "bf")
+                        (
+                            time_ms + max(sustain, min_note_duration_ms),
+                            "note_off",
+                            midi_note,
+                            0,
+                            "bf",
+                        )
                     )
                 else:
-                    sixteenth_ms = (60000 / bpm) / 4
                     all_events.append(
-                        (time_ms + (sixteenth_ms / 2), "note_off", midi_note, 0, "bf")
+                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "bf")
                     )
+            elif warning_count < max_warnings:
+                print(f"Warning: Player note with invalid lane {lane} ignored")
+                warning_count += 1
+                if warning_count == max_warnings:
+                    print("Additional warnings suppressed...")
 
         for time_ms, lane, sustain in opponent_notes:
+            if not self.is_running():
+                return
             if 0 <= lane <= 3:
                 midi_note = base_note + lane + 4
                 all_events.append((time_ms, "note_on", midi_note, 100, "dad"))
                 if sustain > 0:
                     all_events.append(
-                        (time_ms + sustain, "note_off", midi_note, 0, "dad")
+                        (
+                            time_ms + max(sustain, min_note_duration_ms),
+                            "note_off",
+                            midi_note,
+                            0,
+                            "dad",
+                        )
                     )
                 else:
-                    sixteenth_ms = (60000 / bpm) / 4
                     all_events.append(
-                        (time_ms + (sixteenth_ms / 2), "note_off", midi_note, 0, "dad")
+                        (
+                            time_ms + min_note_duration_ms,
+                            "note_off",
+                            midi_note,
+                            0,
+                            "dad",
+                        )
                     )
+            elif warning_count < max_warnings:
+                print(f"Warning: Opponent note with invalid lane {lane} ignored")
+                warning_count += 1
+                if warning_count == max_warnings:
+                    print("Additional warnings suppressed...")
 
         for time_ms, lane, sustain in gf_notes:
-            if 0 <= lane <= 7:
-                midi_note = base_note - 12 + lane
+            if not self.is_running():
+                return
+            if 0 <= lane <= 3:
+                midi_note = base_note + 12 + lane
                 all_events.append((time_ms, "note_on", midi_note, 100, "gf"))
                 if sustain > 0:
                     all_events.append(
-                        (time_ms + sustain, "note_off", midi_note, 0, "gf")
+                        (
+                            time_ms + max(sustain, min_note_duration_ms),
+                            "note_off",
+                            midi_note,
+                            0,
+                            "gf",
+                        )
                     )
                 else:
-                    sixteenth_ms = (60000 / bpm) / 4
                     all_events.append(
-                        (time_ms + (sixteenth_ms / 2), "note_off", midi_note, 0, "gf")
+                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "gf")
                     )
+            elif 4 <= lane <= 7:
+                midi_note = base_note + 16 + (lane - 4)
+                all_events.append((time_ms, "note_on", midi_note, 100, "gf"))
+                if sustain > 0:
+                    all_events.append(
+                        (
+                            time_ms + max(sustain, min_note_duration_ms),
+                            "note_off",
+                            midi_note,
+                            0,
+                            "gf",
+                        )
+                    )
+                else:
+                    all_events.append(
+                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "gf")
+                    )
+            elif warning_count < max_warnings:
+                print(f"Warning: GF note with invalid lane {lane} ignored")
+                warning_count += 1
+                if warning_count == max_warnings:
+                    print("Additional warnings suppressed...")
+
+        if not self.is_running():
+            return
 
         self.progress.emit(75)
 
         all_events.sort(key=lambda x: (x[0], 0 if x[1] == "note_off" else 1))
 
-        ticks_per_ms = (midi.ticks_per_beat * (bpm / 60.0)) / 1000.0
+        ticks_per_beat = midi.ticks_per_beat
+        ticks_per_ms = (ticks_per_beat * (bpm / 60.0)) / 1000.0
+
+        if ticks_per_ms > 1000:
+            ticks_per_ms = 1000
 
         self.status.emit("Writing MIDI events...")
         self.progress.emit(85)
@@ -363,24 +494,31 @@ class ConversionThread(QThread):
             track_events = {"dad": [], "bf": [], "gf": []}
 
             for time_ms, ev_type, note, vel, source in all_events:
+                if not self.is_running():
+                    return
                 tick = int(round(time_ms * ticks_per_ms))
+                if tick > 2**31 - 1:
+                    tick = 2**31 - 1
                 msg = mido.Message(ev_type, note=note, velocity=vel, time=0)
 
                 if source == "dad":
                     track_events["dad"].append((tick, msg))
                 elif source == "bf":
                     track_events["bf"].append((tick, msg))
-                elif source == "gf" and gf_track:
+                elif source == "gf":
                     track_events["gf"].append((tick, msg))
 
             self._write_track_events(dad_track, track_events["dad"])
             self._write_track_events(bf_track, track_events["bf"])
-            if gf_track:
-                self._write_track_events(gf_track, track_events["gf"])
+            self._write_track_events(gf_track, track_events["gf"])
         else:
             track_events = []
             for time_ms, ev_type, note, vel, _ in all_events:
+                if not self.is_running():
+                    return
                 tick = int(round(time_ms * ticks_per_ms))
+                if tick > 2**31 - 1:
+                    tick = 2**31 - 1
                 track_events.append(
                     (tick, mido.Message(ev_type, note=note, velocity=vel, time=0))
                 )
@@ -404,6 +542,8 @@ class ConversionThread(QThread):
             delta_ticks = tick - current_tick
             if delta_ticks < 0:
                 delta_ticks = 0
+            elif delta_ticks > 2**31 - 1:
+                delta_ticks = 2**31 - 1
 
             msg.time = delta_ticks
             track.append(msg)
@@ -468,7 +608,7 @@ class JSON2MIDI(QMainWindow):
         self.meta_file_label.setFrameStyle(QFrame.Shape.Panel | QFrame.Shadow.Sunken)
         self.meta_file_label.setStyleSheet("color: #888888;")
         self.browse_meta_btn = QPushButton("Browse")
-        
+
         if os.path.exists(browse_icon_path):
             self.browse_meta_btn.setIcon(QIcon(browse_icon_path))
 
@@ -486,7 +626,7 @@ class JSON2MIDI(QMainWindow):
         self.output_file_label.setFrameStyle(QFrame.Shape.Panel | QFrame.Shadow.Sunken)
         file_layout.addWidget(self.output_file_label, 2, 1)
         self.browse_output_btn = QPushButton("Browse")
-        
+
         if os.path.exists(browse_icon_path):
             self.browse_output_btn.setIcon(QIcon(browse_icon_path))
 
@@ -518,6 +658,10 @@ class JSON2MIDI(QMainWindow):
         self.bpm_spin.setSuffix(" BPM")
         settings_layout.addWidget(self.bpm_spin, 3, 1)
 
+        self.split_tracks_checkbox = QCheckBox("Split tracks")
+        self.split_tracks_checkbox.setChecked(True)
+        settings_layout.addWidget(self.split_tracks_checkbox, 4, 0, 1, 2)
+
         main_ui_layout.addWidget(settings_group)
 
         self.progress_bar = QProgressBar()
@@ -526,7 +670,7 @@ class JSON2MIDI(QMainWindow):
 
         self.convert_btn = QPushButton("Convert to MIDI")
         self.convert_btn.setMinimumHeight(40)
-        
+
         if os.path.exists(convert_icon_path):
             self.convert_btn.setIcon(QIcon(convert_icon_path))
 
@@ -851,6 +995,12 @@ class JSON2MIDI(QMainWindow):
             )
             return
 
+        if self.conversion_thread and self.conversion_thread.isRunning():
+            self.conversion_thread.stop()
+            if not self.conversion_thread.wait(3000):
+                self.conversion_thread.terminate()
+                self.conversion_thread.wait(1000)
+
         self.convert_btn.setEnabled(False)
         self.browse_chart_btn.setEnabled(False)
         self.browse_output_btn.setEnabled(False)
@@ -864,6 +1014,7 @@ class JSON2MIDI(QMainWindow):
             self.engine_combo.currentText(),
             self.bpm_spin.value(),
             self.difficulty_combo.currentText(),
+            self.split_tracks_checkbox.isChecked(),
             self.meta_path if self.meta_path else None,
         )
 
@@ -894,6 +1045,51 @@ class JSON2MIDI(QMainWindow):
             self.status_bar.showMessage("Conversion failed")
 
         self.progress_bar.setValue(0)
+
+        if self.conversion_thread:
+            try:
+                self.conversion_thread.progress.disconnect(self.update_progress)
+            except (RuntimeError, TypeError):
+                pass
+
+            try:
+                self.conversion_thread.status.disconnect(self.update_status)
+            except (RuntimeError, TypeError):
+                pass
+
+            try:
+                self.conversion_thread.finished_signal.disconnect(
+                    self.conversion_finished
+                )
+            except (RuntimeError, TypeError):
+                pass
+
+            if self.conversion_thread.isRunning():
+                self.conversion_thread.stop()
+                self.conversion_thread.wait(1000)
+
+            self.conversion_thread = None
+
+    def closeEvent(self, event):
+        if self.conversion_thread and self.conversion_thread.isRunning():
+            reply = QMessageBox.question(
+                self,
+                "Conversion in Progress",
+                "A conversion is currently running. Do you want to stop it and exit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.conversion_thread.stop()
+                if not self.conversion_thread.wait(3000):
+                    self.conversion_thread.terminate()
+                    self.conversion_thread.wait(1000)
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
 
 
 def main():
