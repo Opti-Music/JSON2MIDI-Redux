@@ -366,118 +366,73 @@ class ConversionThread(QThread):
 
         base_note = 60
 
-        sixteenth_ms = (60000 / bpm) / 4
-        min_note_duration_ms = max(1, sixteenth_ms / 2)
+        thirty_secondth_ms = (60000 / bpm) / 8
+        min_note_duration_ms = max(10, thirty_secondth_ms)
 
-        all_events = []
-        warning_count = 0
-        max_warnings = 10
+        note_groups = {"bf": {}, "dad": {}, "gf": {}}
+
+        def add_note_to_group(track, note_num, start_ms, end_ms):
+            if note_num not in note_groups[track]:
+                note_groups[track][note_num] = []
+            note_groups[track][note_num].append((start_ms, end_ms))
 
         for time_ms, lane, sustain in player_notes:
-            if not self.is_running():
-                return
             if 0 <= lane <= 3:
                 midi_note = base_note + lane
-                all_events.append((time_ms, "note_on", midi_note, 100, "bf"))
-                if sustain > 0:
-                    all_events.append(
-                        (
-                            time_ms + max(sustain, min_note_duration_ms),
-                            "note_off",
-                            midi_note,
-                            0,
-                            "bf",
-                        )
-                    )
-                else:
-                    all_events.append(
-                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "bf")
-                    )
-            elif warning_count < max_warnings:
-                print(f"Warning: Player note with invalid lane {lane} ignored")
-                warning_count += 1
-                if warning_count == max_warnings:
-                    print("Additional warnings suppressed...")
+                end_ms = time_ms + max(sustain, min_note_duration_ms)
+                add_note_to_group("bf", midi_note, time_ms, end_ms)
 
         for time_ms, lane, sustain in opponent_notes:
-            if not self.is_running():
-                return
             if 0 <= lane <= 3:
                 midi_note = base_note + lane + 4
-                all_events.append((time_ms, "note_on", midi_note, 100, "dad"))
-                if sustain > 0:
-                    all_events.append(
-                        (
-                            time_ms + max(sustain, min_note_duration_ms),
-                            "note_off",
-                            midi_note,
-                            0,
-                            "dad",
-                        )
-                    )
-                else:
-                    all_events.append(
-                        (
-                            time_ms + min_note_duration_ms,
-                            "note_off",
-                            midi_note,
-                            0,
-                            "dad",
-                        )
-                    )
-            elif warning_count < max_warnings:
-                print(f"Warning: Opponent note with invalid lane {lane} ignored")
-                warning_count += 1
-                if warning_count == max_warnings:
-                    print("Additional warnings suppressed...")
+                end_ms = time_ms + max(sustain, min_note_duration_ms)
+                add_note_to_group("dad", midi_note, time_ms, end_ms)
 
         for time_ms, lane, sustain in gf_notes:
-            if not self.is_running():
-                return
             if 0 <= lane <= 3:
                 midi_note = base_note + 12 + lane
-                all_events.append((time_ms, "note_on", midi_note, 100, "gf"))
-                if sustain > 0:
-                    all_events.append(
-                        (
-                            time_ms + max(sustain, min_note_duration_ms),
-                            "note_off",
-                            midi_note,
-                            0,
-                            "gf",
-                        )
-                    )
-                else:
-                    all_events.append(
-                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "gf")
-                    )
+                end_ms = time_ms + max(sustain, min_note_duration_ms)
+                add_note_to_group("gf", midi_note, time_ms, end_ms)
             elif 4 <= lane <= 7:
                 midi_note = base_note + 16 + (lane - 4)
-                all_events.append((time_ms, "note_on", midi_note, 100, "gf"))
-                if sustain > 0:
-                    all_events.append(
-                        (
-                            time_ms + max(sustain, min_note_duration_ms),
-                            "note_off",
-                            midi_note,
-                            0,
-                            "gf",
-                        )
-                    )
-                else:
-                    all_events.append(
-                        (time_ms + min_note_duration_ms, "note_off", midi_note, 0, "gf")
-                    )
-            elif warning_count < max_warnings:
-                print(f"Warning: GF note with invalid lane {lane} ignored")
-                warning_count += 1
-                if warning_count == max_warnings:
-                    print("Additional warnings suppressed...")
+                end_ms = time_ms + max(sustain, min_note_duration_ms)
+                add_note_to_group("gf", midi_note, time_ms, end_ms)
 
         if not self.is_running():
             return
 
         self.progress.emit(75)
+
+        all_events = []
+
+        for track_name, notes_dict in note_groups.items():
+            for note_num, intervals in notes_dict.items():
+                if not intervals:
+                    continue
+
+                intervals.sort(key=lambda x: x[0])
+
+                merged = []
+                current_start, current_end = intervals[0]
+
+                for start, end in intervals[1:]:
+                    if start <= current_end + 5:
+                        current_end = max(current_end, end)
+                    else:
+                        merged.append((current_start, current_end))
+                        current_start, current_end = start, end
+
+                merged.append((current_start, current_end))
+
+                for start_ms, end_ms in merged:
+                    all_events.append((start_ms, "note_on", note_num, 100, track_name))
+                    all_events.append((end_ms, "note_off", note_num, 0, track_name))
+
+        if not self.is_running():
+            return
+
+        self.progress.emit(85)
+        self.status.emit("Writing MIDI events...")
 
         all_events.sort(key=lambda x: (x[0], 0 if x[1] == "note_off" else 1))
 
@@ -486,9 +441,6 @@ class ConversionThread(QThread):
 
         if ticks_per_ms > 1000:
             ticks_per_ms = 1000
-
-        self.status.emit("Writing MIDI events...")
-        self.progress.emit(85)
 
         if self.split_tracks:
             track_events = {"dad": [], "bf": [], "gf": []}
@@ -501,12 +453,8 @@ class ConversionThread(QThread):
                     tick = 2**31 - 1
                 msg = mido.Message(ev_type, note=note, velocity=vel, time=0)
 
-                if source == "dad":
-                    track_events["dad"].append((tick, msg))
-                elif source == "bf":
-                    track_events["bf"].append((tick, msg))
-                elif source == "gf":
-                    track_events["gf"].append((tick, msg))
+                if source in track_events:
+                    track_events[source].append((tick, msg))
 
             self._write_track_events(dad_track, track_events["dad"])
             self._write_track_events(bf_track, track_events["bf"])
