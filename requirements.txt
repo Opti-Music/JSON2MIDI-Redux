@@ -1,2 +1,3 @@
 PySide6
 mido
+auto-py-to-exe # Used to packaging the app into exe
