@@ -1,3 +1,5 @@
+> [!WARNING]
+> This tool is no longer receiving updates because I'm tired of updating it due to the hassle. Anyone is welcome to fork this repository and make changes.
 # JSON2MIDI
 **An open-source tool for converting a chart to MIDI**
 
