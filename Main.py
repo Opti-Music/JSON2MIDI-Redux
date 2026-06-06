@@ -98,9 +98,9 @@ class ConversionThread(QThread):
 
     def is_running(self):
         self._mutex.lock()
-        running = self._is_running
+        self._is_running = self._is_running
         self._mutex.unlock()
-        return running
+        return self._is_running
 
     def run(self):
         try:
@@ -294,7 +294,7 @@ class ConversionThread(QThread):
 
             section_notes = section.get("sectionNotes", [])
             for note in section_notes:
-                if len(note) < 3:
+                if len(note) < 2:
                     continue
 
                 time_ms = float(note[0])
@@ -434,8 +434,6 @@ class ConversionThread(QThread):
         self.progress.emit(85)
         self.status.emit("Writing MIDI events...")
 
-        all_events.sort(key=lambda x: (x[0], 0 if x[1] == "note_off" else 1))
-
         ticks_per_beat = midi.ticks_per_beat
         ticks_per_ms = (ticks_per_beat * (bpm / 60.0)) / 1000.0
 
@@ -483,7 +481,7 @@ class ConversionThread(QThread):
         if not events:
             return
 
-        events.sort(key=lambda x: x[0])
+        events.sort(key=lambda x: (x[0], 0 if x[1].type == "note_off" else 1))
         current_tick = 0
 
         for tick, msg in events:
@@ -913,146 +911,52 @@ class JSON2MIDI(QMainWindow):
             self.update_convert_button()
 
     def update_convert_button(self):
+        has_chart = bool(self.chart_path)
+        has_output = bool(self.output_path)
         engine = self.engine_combo.currentText()
-        meta_required = (
-            engine == EngineType.VSLICE.value or engine == EngineType.CODENAME.value
-        )
+        
+        needs_meta = engine in [EngineType.VSLICE.value, EngineType.CODENAME.value]
+        has_meta = bool(self.meta_path) if needs_meta else True
 
-        if meta_required:
-            self.convert_btn.setEnabled(
-                bool(self.chart_path and self.output_path and self.meta_path)
-            )
-        else:
-            self.convert_btn.setEnabled(bool(self.chart_path and self.output_path))
+        self.convert_btn.setEnabled(has_chart and has_output and has_meta)
 
     def start_conversion(self):
-        if not self.chart_path or not self.output_path:
-            QMessageBox.warning(
-                self, "Warning", "Please select both input chart and output MIDI file"
-            )
-            return
-
-        engine = self.engine_combo.currentText()
-        if (
-            engine == EngineType.VSLICE.value or engine == EngineType.CODENAME.value
-        ) and not self.meta_path:
-            QMessageBox.warning(
-                self,
-                "Warning",
-                f"Please select the {engine} metadata/meta file before conversion",
-            )
-            return
-
         if self.conversion_thread and self.conversion_thread.isRunning():
-            self.conversion_thread.stop()
-            if not self.conversion_thread.wait(3000):
-                self.conversion_thread.terminate()
-                self.conversion_thread.wait(1000)
+            return
 
         self.convert_btn.setEnabled(False)
-        self.browse_chart_btn.setEnabled(False)
-        self.browse_output_btn.setEnabled(False)
-        self.browse_meta_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
 
         self.conversion_thread = ConversionThread(
-            self.chart_path,
-            self.output_path,
-            self.engine_combo.currentText(),
-            self.bpm_spin.value(),
-            self.difficulty_combo.currentText(),
-            self.split_tracks_checkbox.isChecked(),
-            self.meta_path if self.meta_path else None,
+            chart_path=self.chart_path,
+            output_path=self.output_path,
+            engine=self.engine_combo.currentText(),
+            bpm_override=self.bpm_spin.value(),
+            difficulty=self.difficulty_combo.currentText(),
+            split_tracks=self.split_tracks_checkbox.isChecked(),
+            meta_path=self.meta_path if self.meta_group.isVisible() else None,
         )
 
-        self.conversion_thread.progress.connect(self.update_progress)
-        self.conversion_thread.status.connect(self.update_status)
+        self.conversion_thread.progress.connect(self.progress_bar.setValue)
+        self.conversion_thread.status.connect(self.status_bar.showMessage)
         self.conversion_thread.finished_signal.connect(self.conversion_finished)
-
         self.conversion_thread.start()
-
-    def update_progress(self, value: int):
-        self.progress_bar.setValue(value)
-
-    def update_status(self, status: str):
-        self.status_bar.showMessage(status)
 
     def conversion_finished(self, success: bool, message: str):
         self.progress_bar.setVisible(False)
-        self.convert_btn.setEnabled(True)
-        self.browse_chart_btn.setEnabled(True)
-        self.browse_output_btn.setEnabled(True)
-        self.browse_meta_btn.setEnabled(True)
+        self.update_convert_button()
 
         if success:
             QMessageBox.information(self, "Success", message)
-            self.status_bar.showMessage("Ready")
+            self.status_bar.showMessage("Conversion successful")
         else:
             QMessageBox.critical(self, "Error", message)
             self.status_bar.showMessage("Conversion failed")
 
-        self.progress_bar.setValue(0)
-
-        if self.conversion_thread:
-            try:
-                self.conversion_thread.progress.disconnect(self.update_progress)
-            except (RuntimeError, TypeError):
-                pass
-
-            try:
-                self.conversion_thread.status.disconnect(self.update_status)
-            except (RuntimeError, TypeError):
-                pass
-
-            try:
-                self.conversion_thread.finished_signal.disconnect(
-                    self.conversion_finished
-                )
-            except (RuntimeError, TypeError):
-                pass
-
-            if self.conversion_thread.isRunning():
-                self.conversion_thread.stop()
-                self.conversion_thread.wait(1000)
-
-            self.conversion_thread = None
-
-    def closeEvent(self, event):
-        if self.conversion_thread and self.conversion_thread.isRunning():
-            reply = QMessageBox.question(
-                self,
-                "Conversion in Progress",
-                "A conversion is currently running. Do you want to stop it and exit?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-
-            if reply == QMessageBox.StandardButton.Yes:
-                self.conversion_thread.stop()
-                if not self.conversion_thread.wait(3000):
-                    self.conversion_thread.terminate()
-                    self.conversion_thread.wait(1000)
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
-
-
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("JSON2MIDI")
-
-    app_icon_path = resource_path("icons/app.ico")
-    if os.path.exists(app_icon_path):
-        app.setWindowIcon(QIcon(app_icon_path))
-
-    window = JSON2MIDI()
-    window.show()
-
-    sys.exit(app.exec())
-
 
 if __name__ == "__main__":
-    main()
+    app = QApplication(sys.argv)
+    window = JSON2MIDI()
+    window.show()
+    sys.exit(app.exec())
