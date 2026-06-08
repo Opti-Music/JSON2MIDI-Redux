@@ -1,0 +1,10 @@
+pyinstaller --noconsole --onefile --add-data "icons;icons" --name "JSON2MIDI_Converter" converter.py
+
+PyInstaller is needed to run this code as you will have to paste it directly into your terminal/command prompt inside your project folder
+
+Once PyInstaller finishes compiling you will see a couple of new folders generated inside your working directory
+(build/ and dist/).
+
+Open the dist folder.
+Inside, you will find JSON2MIDI_Converter.exe. This file is completely portable.
+Before building, make sure you have PyInstaller installed alongside your project requirements.
